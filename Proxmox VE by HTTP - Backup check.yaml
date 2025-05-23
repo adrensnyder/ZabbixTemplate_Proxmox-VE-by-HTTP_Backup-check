@@ -1,0 +1,972 @@
+zabbix_export:
+  version: '6.0'
+  date: '2025-05-23T12:12:53Z'
+  groups:
+    - uuid: de1143f089864e559c7816947bcdb5d5
+      name: "Templates - \t0_CST_TPL"
+  templates:
+    - uuid: 43bdb9ebdc9743f990a86d868a8bad79
+      template: '0_CST_TPL-Proxmox VE by HTTP - Backup check'
+      name: '0_CST_TPL-Proxmox VE by HTTP - Backup check'
+      description: |
+        Add SNMP interface with the ip of the Proxmox node
+        
+        Edit macro {$PVE.HOSTNAME} with the hostname of the node
+        
+        Create group "zabbix" in Permissions - Groups
+        Create user "zabbix" with group "Zabbix" in Permissions - Users
+        
+        Create an API token for user "zabbix@xxx" with token id "zabbix"
+        Please copy the TokenID and Secret separately as they will not be displayed afterwards
+        
+        Create a new role in Roles, or edit it if already exist, named "Zabbix" with:
+        Datastore.Audit
+        Pool.Audit
+        SDN.Audit
+        Sys.Audit
+        VM.Audit
+        
+        Add/Replace User/Group/Api permission in Permissions with:
+        Path: /
+        User: [The zabbix User/Group/Api]
+        Role: Zabbix
+        
+        Note: All the 3 permissions are needed to get the template working
+        
+        In the Zabbix Host modify the Macro {$PVE.TOKEN.ID} and {$PVE.TOKEN.SECRET} with the values we saved before
+        
+        There credentials are shared across all the nodes
+      groups:
+        - name: "Templates - \t0_CST_TPL"
+      items:
+        - uuid: a1db6a909b254b9f9d20fdfe688f1d31
+          name: 'Proxmox: Backup Api Error'
+          type: DEPENDENT
+          key: proxmox.backup.api.errors
+          delay: '0'
+          trends: '0'
+          value_type: TEXT
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.APIError
+          master_item:
+            key: proxmox.backup.data
+          triggers:
+            - uuid: 5aeb5767165b494dad6d5ee6f997caa2
+              expression: 'find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.api.errors,,"regexp","Ok")=0'
+              name: 'Proxmox: Backup API error'
+              priority: HIGH
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 39b2a749ed474f17b271bc8da1253e98
+          name: 'Proxmox: Backup - Get data'
+          type: SCRIPT
+          key: proxmox.backup.data
+          delay: '0;1h/1-7,07:00-08:30;1h/1-7,10:00-11:30;1h/1-7,13:00-14:30;1h/1-7,16:00-16:30'
+          history: 7d
+          trends: '0'
+          value_type: TEXT
+          params: |
+            var BackupData = {
+                BkHostCount: 0,
+                APIError: "Ok",
+                ScheduleOverride: 0,
+                StateCheck: 1,
+                data: []
+            };
+            
+            var params = JSON.parse(value);
+            
+            BackupData.ScheduleOverride = params.scheduleoverride;
+            BackupData.StateCheck = params.statecheck;
+            
+            StateCheckSizeKb = params.statechecksize * 1000;
+            
+            var req = new HttpRequest();
+            req.addHeader('Authorization: PVEAPIToken=' + params.token + '=' + params.secret);
+            
+            var hostsResult, storageResult, jobsResult, allBackups = {};
+            
+            try {
+                fullUrl = 'https://' + params.url + ':' + params.port + '/api2/json/nodes/' + params.hostname + '/qemu';
+                hostsResult = retryRequest(fullUrl,params.retry,params.retryms);
+                
+                fullUrl = 'https://' + params.url + ':' + params.port + '/api2/json/nodes/' + params.hostname + '/storage/';
+                storageResult = retryRequest(fullUrl,params.retry,params.retryms);
+                
+                fullUrl = 'https://' + params.url + ':' + params.port + '/api2/json/cluster/backup';
+                jobsResult = retryRequest(fullUrl,params.retry,params.retryms);
+            } catch (error) {
+                BackupData.APIError = "Proxmox API failed. Error: " + error + " (URL: " + fullUrl + ")";
+                return JSON.stringify(BackupData);
+            }
+            
+            try {
+                var hostsData = JSON.parse(hostsResult).data;
+                var storageData = JSON.parse(storageResult).data;
+                var jobsData = JSON.parse(jobsResult).data;
+            } catch (error) {
+                BackupData.APIError = "Proxmox API failed. Error: " + error;
+                return JSON.stringify(BackupData);
+            }
+            
+            var backupCounts = {};
+            var latestBackups = {};
+            
+            for (var i = 0; i < storageData.length; i++) {
+                var storageObj = storageData[i];
+                try {
+                    fullUrl = 'https://' + params.url + ':' + params.port + '/api2/json/nodes/' + params.hostname + '/storage/' + storageObj.storage + '/content?content=backup';
+                    var result_backuplist = retryRequest(fullUrl,params.retry,params.retryms);
+                    allBackups[storageObj.storage] = JSON.parse(result_backuplist).data;
+                } catch (error) {
+                    BackupData.APIError = "Proxmox API failed. Error: " + error + " (URL: " + fullUrl + ")";
+                    return JSON.stringify(BackupData);
+                }
+            }
+            
+            for (var j = 0; j < hostsData.length; j++) {
+                var host = hostsData[j];
+                var vmid = host.vmid;
+                var tags = host.tags ? host.tags : "no_tags";
+            
+                if (!backupCounts[vmid]) backupCounts[vmid] = 0;
+            
+                var backupFound = false;
+            
+                for (var storageName in allBackups) {
+                    var backups = allBackups[storageName];
+                    if (!Array.isArray(backups)) {
+                        continue;
+                    }
+            
+                    for (var k = 0; k < backups.length; k++) {
+                        var backup = backups[k];
+                        if (backup.vmid === vmid && areFieldsValid(backup)) {
+                            backupCounts[vmid]++;
+                            var backupKey = vmid + '-' + storageName;
+                            var verificationstate = backup.verification && backup.verification.state ? backup.verification.state : "Not found";
+                            backupFound = true;
+            
+                            if (!latestBackups[backupKey] || backup.ctime > latestBackups[backupKey].ctime) {
+                                latestBackups[backupKey] = {
+                                    vmid: vmid,
+                                    ctime: backup.ctime,
+                                    verificationState: verificationstate,
+                                    size: backup.size,
+                                    hostName: host.name,
+                                    vmstatus: host.status,
+                                    storageName: storageName,
+                                    vmstatus: tags
+                                };
+                            }
+                        }
+                    }
+                }
+            
+                if (!backupFound) {
+                    var job = findJobForVmid(vmid, jobsData);
+                    var frequency = job ? getBackupFrequency(job.schedule) : -1;
+                    var storage = job ? job.storage : "NoStorage";
+            
+                    BackupData.data.push({
+                        "BkVmID": vmid,
+                        "BkScheduled": "Error",
+                        "BkFrequency": frequency,
+                        "BkName": storage + " - " + host.name,
+                        "BkTime": 0,
+                        "BkDays": 99,
+                        "BkState": "Not found",
+                        "BkSize": 0,
+                        "BkDaysLate": 99,
+                        "BkCount": 0,
+                        "VmStatus": host.status,
+                        "VmTags": tags
+                    });
+                    
+                    if (job) {
+                        BackupData.BkHostCount++;
+                    }
+                }
+            }
+            
+            for (var backupKey in latestBackups) {
+                var backupInfo = latestBackups[backupKey];
+                var job = findJobForVmid(backupInfo.vmid, jobsData);
+                var frequency = job ? getBackupFrequency(job.schedule) : -1;
+                var daysLate = job ? calculateDaysLate(backupInfo.ctime, job.schedule) : -1;
+            
+                BackupData.data.push({
+                    "BkVmID": backupInfo.vmid,
+                    "BkScheduled": job ? job.schedule : "Error",
+                    "BkFrequency": frequency,
+                    "BkName": backupInfo.storageName + " - " + backupInfo.hostName,
+                    "BkTime": backupInfo.ctime,
+                    "BkDays": calculateDaysFromEpoch(backupInfo.ctime),
+                    "BkState": backupInfo.verificationState,
+                    "BkSize": backupInfo.size,
+                    "BkDaysLate": daysLate,
+                    "BkCount": backupCounts[backupInfo.vmid],
+                    "VmStatus": backupInfo.vmstatus,
+                    "VmTags": backupInfo.vmstatus
+                });
+            
+                BackupData.BkHostCount++;
+            }
+            
+            return JSON.stringify(BackupData);
+            
+            /*
+            function areFieldsValid(backup) {
+                return backup && backup.ctime !== undefined && backup.verification && backup.verification.state !== undefined;
+            }
+            */
+            
+            function areFieldsValid(backup) {
+                if (params.statecheck == 1) {
+                    return (
+                        backup &&
+                        backup.ctime !== undefined &&
+                        backup.verification && 
+                        backup.verification.state !== undefined &&
+                        backup.size !== undefined &&
+                        backup.size > StateCheckSizeKb
+                    );
+                } else if (params.statecheck == 0) {
+                    return (
+                        backup &&
+                        backup.ctime !== undefined &&
+                        backup.size !== undefined &&
+                        backup.size > StateCheckSizeKb
+                    );
+                }
+            
+                return false;
+            }
+            
+            
+            function calculateDaysFromEpoch(epochTime) {
+                var now = Date.now();
+                return Math.floor((now - epochTime * 1000) / (1000 * 60 * 60 * 24));
+            }
+            
+            function getBackupFrequency(schedule) {
+                if (/^(\d{2}:\d{2})$/.test(schedule)) return 1;
+                if (/^[a-zA-Z]{3}\.\./.test(schedule)) return 3;
+                if (/^[a-zA-Z]{3} \d{2}:\d{2}$/.test(schedule)) return 7;
+                if (/^[a-zA-Z]{3} \*-1\.\.7 \d{2}:\d{2}$/.test(schedule)) return 31;
+                if (/^monthly$/.test(schedule)) return 31;
+                if (/^yearly$/.test(schedule)) return 365;
+            
+                return -1;
+            }
+            
+            function calculateDaysLate(backupCtime, schedule) {
+                var frequency = getBackupFrequency(schedule);
+            
+                if (frequency === -1) return -1;
+            
+                if (frequency < params.scheduleoverride) {
+                    frequency = params.scheduleoverride;
+                }
+            
+                var daysSinceBackup = calculateDaysFromEpoch(backupCtime);
+                return daysSinceBackup - frequency;
+            }
+            
+            function findJobForVmid(vmid, jobsData) {
+                for (var i = 0; i < jobsData.length; i++) {
+                    var job = jobsData[i];
+                    if ((typeof job.vmid === 'string' && job.vmid.includes(vmid)) || (Array.isArray(job.vmid) && job.vmid.includes(vmid))) {
+                        return job;
+                    }
+                }
+                return null;
+            }
+            
+            function retryRequest(url, retries, delay) {
+                while (retries >= 0) {
+                    try {
+                        return req.get(encodeURI(url));
+                    } catch (error) {
+                        if (retries === 0) {
+                            throw error;
+                        }
+                        retries--;
+            
+                        var start = Date.now();
+                        while (Date.now() - start < delay) {
+                            // Empty cycle. Waiting
+                        }
+                    }
+                }
+            }
+          description: |
+            Get cluster backup data. 
+            By AdrenSnyder
+          timeout: 1m
+          parameters:
+            - name: hostname
+              value: '{$PVE.HOSTNAME}'
+            - name: port
+              value: '{$PVE.URL.PORT}'
+            - name: retry
+              value: '{$PROXMOX.REQ.RETRY}'
+            - name: retryms
+              value: '{$PROXMOX.REQ.RETRY.MS}'
+            - name: scheduleoverride
+              value: '{$PROXMOX.BACKUP.SCHEDULE.OVERRIDE}'
+            - name: secret
+              value: '{$PVE.TOKEN.SECRET}'
+            - name: statecheck
+              value: '{$PROXMOX.BACKUP.STATE.CHECK}'
+            - name: statechecksize
+              value: '{$PROXMOX.BACKUP.STATE.CHECK.SIZE}'
+            - name: token
+              value: '{$PVE.TOKEN.ID}'
+            - name: url
+              value: '{HOST.CONN}'
+          tags:
+            - tag: component
+              value: backup
+        - uuid: 7be231abe7c44bc0b0318e4d737e757e
+          name: 'Proxmox: Backup Host Count'
+          type: DEPENDENT
+          key: proxmox.backup.host.count
+          delay: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.BkHostCount
+          master_item:
+            key: proxmox.backup.data
+          triggers:
+            - uuid: 01a6bcfb1c2345709171010e5dc87f70
+              expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,1d)=0'
+              name: 'Proxmox: Backup no host found'
+              priority: WARNING
+              dependencies:
+                - name: 'Proxmox: Backup no host found'
+                  expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,2d)=0'
+            - uuid: 346773b4b5474225aed23b6e0ef168e9
+              expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,2d)=0'
+              name: 'Proxmox: Backup no host found'
+              priority: AVERAGE
+              dependencies:
+                - name: 'Proxmox: Backup no host found'
+                  expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,3d)=0'
+            - uuid: 3cacaa0d87f8469aa2dc76eb9f550713
+              expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,3d)=0'
+              name: 'Proxmox: Backup no host found'
+              priority: HIGH
+              dependencies:
+                - name: 'Proxmox: Backup no host found'
+                  expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,4d)=0'
+            - uuid: 8a258de5229b47a3a4be571ce1623d8a
+              expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,4d)=0'
+              name: 'Proxmox: Backup no host found'
+              priority: DISASTER
+        - uuid: 03d9e3f697d74492afbcc03fc5411dfc
+          name: 'Proxmox: Backup Schedule Override'
+          type: DEPENDENT
+          key: proxmox.backup.schedule.override
+          delay: '0'
+          value_type: FLOAT
+          units: d
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.ScheduleOverride
+          master_item:
+            key: proxmox.backup.data
+          triggers:
+            - uuid: 71b4817b07694a3e8d323bf035688935
+              expression: 'last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.schedule.override)>0'
+              name: 'Proxmox: Backup Check Override Set: {ITEM.VALUE}'
+              priority: INFO
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: ee7a2fd7a1864649a19f5f16844c8e15
+          name: 'Proxmox: Backup State Check'
+          type: DEPENDENT
+          key: proxmox.backup.state.check
+          delay: '0'
+          value_type: FLOAT
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.StateCheck
+          master_item:
+            key: proxmox.backup.data
+          triggers:
+            - uuid: b281f6ee6c6d4ed0a2128b102d45b1b8
+              expression: 'last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.state.check)<>1'
+              name: 'Proxmox: Backup State Check Set: {ITEM.VALUE}'
+              priority: INFO
+              description: 'The backups will not be checked for the "ok" status. Only size>0 will be checked'
+              tags:
+                - tag: scope
+                  value: availability
+      discovery_rules:
+        - uuid: 1e5a4022f9484d75b0f3c6e15b043ca5
+          name: 'Backup discovery'
+          type: DEPENDENT
+          key: proxmox.backup.discovery
+          delay: '0'
+          lifetime: '0'
+          item_prototypes:
+            - uuid: b4af6ff784b241519fb05c19f8856eed
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Days of backuptime from now'
+              type: DEPENDENT
+              key: 'proxmox.backup.backupdaysfromnow[{#BACKUP.NAME}]'
+              delay: '0'
+              units: d
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.BkName == "{#BACKUP.NAME}")].BkDays.first()'
+              master_item:
+                key: proxmox.backup.data
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+            - uuid: 9ab4e438e21e4704b8e4bf1760e937e3
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Timestamp'
+              type: DEPENDENT
+              key: 'proxmox.backup.backuptime[{#BACKUP.NAME}]'
+              delay: '0'
+              units: unixtime
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.BkName == "{#BACKUP.NAME}")].BkTime.first()'
+              master_item:
+                key: proxmox.backup.data
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+            - uuid: e37af5116a28417885bb37080a1275f3
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Count'
+              type: DEPENDENT
+              key: 'proxmox.backup.count[{#BACKUP.NAME}]'
+              delay: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.BkName == "{#BACKUP.NAME}")].BkCount.first()'
+              master_item:
+                key: proxmox.backup.data
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+              trigger_prototypes:
+                - uuid: fe2d7296db49468bbba74f34af9d3d42
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.count[{#BACKUP.NAME}],{$PROXMOX.NODATA01})=1'
+                  name: 'Proxmox: Backup [{#BACKUP.NAME}] Count - Not updated'
+                  priority: WARNING
+                  dependencies:
+                    - name: 'Proxmox: Backup [{#BACKUP.NAME}] Count - Not updated'
+                      expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.count[{#BACKUP.NAME}],{$PROXMOX.NODATA02})=1'
+                - uuid: d4ad3747835e4b3f8d6fffc49245eb12
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.count[{#BACKUP.NAME}],{$PROXMOX.NODATA02})=1'
+                  name: 'Proxmox: Backup [{#BACKUP.NAME}] Count - Not updated'
+                  priority: AVERAGE
+                  dependencies:
+                    - name: 'Proxmox: Backup [{#BACKUP.NAME}] Count - Not updated'
+                      expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.count[{#BACKUP.NAME}],{$PROXMOX.NODATA03})=1'
+                - uuid: 4dbb8595e6114d32a48bf37a51b2eee2
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.count[{#BACKUP.NAME}],{$PROXMOX.NODATA03})=1'
+                  name: 'Proxmox: Backup [{#BACKUP.NAME}] Count - Not updated'
+                  priority: HIGH
+                  dependencies:
+                    - name: 'Proxmox: Backup [{#BACKUP.NAME}] Count - Not updated'
+                      expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.count[{#BACKUP.NAME}],{$PROXMOX.NODATA04})=1'
+                - uuid: 4169fcafc965431a98503579bfb1ee4c
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.count[{#BACKUP.NAME}],{$PROXMOX.NODATA04})=1'
+                  name: 'Proxmox: Backup [{#BACKUP.NAME}] Count - Not updated'
+                  priority: DISASTER
+            - uuid: 1dc86ee1e6f44a518f530e16e445fb92
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Days Late'
+              type: DEPENDENT
+              key: 'proxmox.backup.dayslate[{#BACKUP.NAME}]'
+              delay: '0'
+              value_type: FLOAT
+              units: d
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.BkName == "{#BACKUP.NAME}")].BkDaysLate.first()'
+              master_item:
+                key: proxmox.backup.data
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+            - uuid: ae847134eebe4b8aae6a7305fcab0d51
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Frequency'
+              type: DEPENDENT
+              key: 'proxmox.backup.frequency[{#BACKUP.NAME}]'
+              delay: '0'
+              units: d
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.BkName == "{#BACKUP.NAME}")].BkFrequency.first()'
+              master_item:
+                key: proxmox.backup.data
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+            - uuid: 8a4ff0029e164cbdb87e8438fa2fdaac
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Schedule'
+              type: DEPENDENT
+              key: 'proxmox.backup.schedule[{#BACKUP.NAME}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.BkName == "{#BACKUP.NAME}")].BkScheduled.first()'
+              master_item:
+                key: proxmox.backup.data
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+            - uuid: 959b657b1db44b16befd5a7a7e50bf5e
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Size'
+              type: DEPENDENT
+              key: 'proxmox.backup.size[{#BACKUP.NAME}]'
+              delay: '0'
+              units: b
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.BkName == "{#BACKUP.NAME}")].BkSize.first()'
+              master_item:
+                key: proxmox.backup.data
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+            - uuid: 52d91774a2d440afb6215bb0730ec671
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Verification state'
+              type: DEPENDENT
+              key: 'proxmox.backup.state[{#BACKUP.NAME}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.BkName == "{#BACKUP.NAME}")].BkState.first()'
+              master_item:
+                key: proxmox.backup.data
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+            - uuid: c06078a52af14ee098853bef996d0df7
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Vm Info - Ha Managed'
+              type: DEPENDENT
+              key: 'proxmox.backup.vm.ha.managed[{#BACKUP.NAME}]'
+              delay: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.data.ha.managed
+              master_item:
+                key: 'proxmox.backup.vm.info[{#BACKUP.NAME}]'
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+            - uuid: 8d64531cfd684dcea943265ce430926b
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Vm Info - Ha Status'
+              type: DEPENDENT
+              key: 'proxmox.backup.vm.ha.status[{#BACKUP.NAME}]'
+              delay: '0'
+              description: 'If data.ha.state is "error" it will be 1. Else if will be 0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.data.ha.state
+                - type: REGEX
+                  parameters:
+                    - error
+                    - '1'
+                  error_handler: CUSTOM_VALUE
+                  error_handler_params: '0'
+              master_item:
+                key: 'proxmox.backup.vm.info[{#BACKUP.NAME}]'
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+            - uuid: 8621f883c3b148caa5e10291ea9cf389
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Vm Info - Api status'
+              type: DEPENDENT
+              key: 'proxmox.backup.vm.info.api.status[{#BACKUP.NAME}]'
+              delay: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.APIError
+                - type: REGEX
+                  parameters:
+                    - ^Ok$
+                    - '0'
+                  error_handler: CUSTOM_VALUE
+                  error_handler_params: '1'
+              master_item:
+                key: 'proxmox.backup.vm.info[{#BACKUP.NAME}]'
+            - uuid: 7936e5fb847341058f93edbd1fc81e55
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Vm info'
+              type: DEPENDENT
+              key: 'proxmox.backup.vm.info[{#BACKUP.NAME}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.BkName == "{#BACKUP.NAME}")].BkVmID.first()'
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      var VmInfo = {
+                          APIError: "Ok",
+                          data: []
+                      };
+                      
+                      var token = '{$PVE.TOKEN.ID}';
+                      var secret = '{$PVE.TOKEN.SECRET}';
+                      var hostname = '{$PVE.HOSTNAME}';
+                      var url = '{$PVE.HOST.URL}';
+                      var port = '{$PVE.URL.PORT}';
+                      var retry = '{$PROXMOX.REQ.RETRY}';
+                      var retryms = '{$PROXMOX.REQ.RETRY.MS}';
+                      
+                      var req = new HttpRequest();
+                      req.addHeader('Authorization: PVEAPIToken=' + token + '=' + secret);
+                      
+                      var VmResult = {};
+                      
+                      try {
+                          fullUrl = 'https://' + url + ':' + port + '/api2/json/nodes/' + hostname + '/qemu/' + value + '/status/current';
+                          VmResult = retryRequest(fullUrl,retry,retryms);
+                      
+                          var jsonResponse = JSON.parse(VmResult);
+                          VmInfo.data = jsonResponse.data;
+                      } catch (error) {
+                          VmInfo.APIError = "Proxmox API failed. Error: " + error + " (URL: " + fullUrl + ")";
+                          return JSON.stringify(VmInfo);
+                      }
+                      
+                      return JSON.stringify(VmInfo);
+                      
+                      function retryRequest(url, retries, delay) {
+                          while (retries >= 0) {
+                              try {
+                                  return req.get(encodeURI(url));
+                              } catch (error) {
+                                  if (retries === 0) {
+                                      throw error;
+                                  }
+                                  retries--;
+                      
+                                  var start = Date.now();
+                                  while (Date.now() - start < delay) {
+                                      // Empty cycle. Waiting
+                                  }
+                              }
+                          }
+                      }
+              master_item:
+                key: proxmox.backup.data
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+            - uuid: 329325aede6540669eb4208c62864a4d
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Vm Info - qmpstatus'
+              type: DEPENDENT
+              key: 'proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.data.qmpstatus
+              master_item:
+                key: 'proxmox.backup.vm.info[{#BACKUP.NAME}]'
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+            - uuid: 9dd67d23ecec4e1380b7eb4fdb0395db
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Vm Status'
+              type: DEPENDENT
+              key: 'proxmox.backup.vm.status[{#BACKUP.NAME}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.BkName == "{#BACKUP.NAME}")].VmStatus.first()'
+              master_item:
+                key: proxmox.backup.data
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+            - uuid: 23672e1a0e834ca68bb626fdee9a242b
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Vm Info - Tags - Check Enable'
+              type: DEPENDENT
+              key: 'proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}]'
+              delay: '0'
+              description: 'If tags contain {$PROXMOX.BACKUP.TAG.CHECK.ENABLED} it will be 1. Else if will be 0'
+              preprocessing:
+                - type: REGEX
+                  parameters:
+                    - '\b{$PROXMOX.BACKUP.TAG.CHECK.ENABLED}\b'
+                    - '1'
+                  error_handler: CUSTOM_VALUE
+                  error_handler_params: '0'
+              master_item:
+                key: 'proxmox.backup.vm.tags[{#BACKUP.NAME}]'
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+              trigger_prototypes:
+                - uuid: 2b4152067bc047c4b8a7e50685310857
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}],{$PROXMOX.NODATA01})=1'
+                  name: 'Proxmox: Backup [{#BACKUP.NAME}] Tags Check Enable - Not updated'
+                  priority: WARNING
+                  dependencies:
+                    - name: 'Proxmox: Backup [{#BACKUP.NAME}] Tags Check Enable - Not updated'
+                      expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}],{$PROXMOX.NODATA02})=1'
+                - uuid: 8fd9d3c0e63f4f5090b365e4080991fd
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}],{$PROXMOX.NODATA02})=1'
+                  name: 'Proxmox: Backup [{#BACKUP.NAME}] Tags Check Enable - Not updated'
+                  priority: AVERAGE
+                  dependencies:
+                    - name: 'Proxmox: Backup [{#BACKUP.NAME}] Tags Check Enable - Not updated'
+                      expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}],{$PROXMOX.NODATA03})=1'
+                - uuid: a256c26531c641ba8b6bf5208c1db9f4
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}],{$PROXMOX.NODATA03})=1'
+                  name: 'Proxmox: Backup [{#BACKUP.NAME}] Tags Check Enable - Not updated'
+                  priority: HIGH
+                  dependencies:
+                    - name: 'Proxmox: Backup [{#BACKUP.NAME}] Tags Check Enable - Not updated'
+                      expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}],{$PROXMOX.NODATA04})=1'
+                - uuid: 2a93cdb4c1454281b4401475ebf1a433
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}],{$PROXMOX.NODATA04})=1'
+                  name: 'Proxmox: Backup [{#BACKUP.NAME}] Tags Check Enable - Not updated'
+                  priority: DISASTER
+            - uuid: deb69bf1de684f1bac49bc7fd1f1c44e
+              name: 'Proxmox: Backup [{#BACKUP.NAME}]: Tags'
+              type: DEPENDENT
+              key: 'proxmox.backup.vm.tags[{#BACKUP.NAME}]'
+              delay: '0'
+              trends: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.data[?(@.BkName == "{#BACKUP.NAME}")].VmTags.first()'
+              master_item:
+                key: proxmox.backup.data
+              tags:
+                - tag: component
+                  value: backup
+                - tag: host
+                  value: '{#BACKUP.NAME}'
+          trigger_prototypes:
+            - uuid: 30f7056a89a34f5bba78afaa83bb493f
+              expression: |
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE01} and 
+                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
+              priority: WARNING
+              dependencies:
+                - name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
+                  expression: |
+                    last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE02} and 
+                    find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+            - uuid: 72cbd6f3664e460eb45d37c331c42d70
+              expression: |
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE02} and 
+                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
+              priority: AVERAGE
+              dependencies:
+                - name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
+                  expression: |
+                    last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE03} and 
+                    find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+            - uuid: afb2728cf1c340ea9e584ddd7745420a
+              expression: |
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE03} and 
+                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
+              priority: HIGH
+              dependencies:
+                - name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
+                  expression: |
+                    last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE04} and 
+                    find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+            - uuid: 3a9d6e3a37244f77a8a446a487405700
+              expression: |
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE04} and 
+                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
+              priority: DISASTER
+            - uuid: 8345c16b1486489a8b80e38e24c8f702
+              expression: |
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE01} and 
+                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=0 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE} - VM Not running)'
+              priority: INFO
+            - uuid: 1bc4d8a8680549bd86b65ad85a18d609
+              expression: |
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.count[{#BACKUP.NAME}])=0 and
+                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] No backups found'
+              priority: DISASTER
+            - uuid: 54218206c0694738a3126aaac440ce64
+              expression: |
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.count[{#BACKUP.NAME}])=0 and
+                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=0 and
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] No backups found (VM not running)'
+              priority: INFO
+            - uuid: 42a75e77deaf47e790bf6dc3af8a1836
+              expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],{$PROXMOX.NODATA01})=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1'
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] qmpstatus - Not updated'
+              priority: WARNING
+              dependencies:
+                - name: 'Proxmox: Backup [{#BACKUP.NAME}] qmpstatus - Not updated'
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],{$PROXMOX.NODATA02})=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1'
+            - uuid: 6655d353701c415eb114f192d32dd4bf
+              expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],{$PROXMOX.NODATA02})=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1'
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] qmpstatus - Not updated'
+              priority: AVERAGE
+              dependencies:
+                - name: 'Proxmox: Backup [{#BACKUP.NAME}] qmpstatus - Not updated'
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],{$PROXMOX.NODATA03})=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1'
+            - uuid: cbf629e8e7fb46ba8f7f0215db83bb42
+              expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],{$PROXMOX.NODATA03})=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1'
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] qmpstatus - Not updated'
+              priority: HIGH
+              dependencies:
+                - name: 'Proxmox: Backup [{#BACKUP.NAME}] qmpstatus - Not updated'
+                  expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],{$PROXMOX.NODATA04})=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1'
+            - uuid: 9ac8036c14124071b257930369c5f5f3
+              expression: 'nodata(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],{$PROXMOX.NODATA04})=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1'
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] qmpstatus - Not updated'
+              priority: DISASTER
+            - uuid: 909253eee33b44218436d00a407f8e57
+              expression: 'last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.frequency[{#BACKUP.NAME}])=-1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1'
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] Schedule frequency not recognized'
+              priority: WARNING
+            - uuid: 5b8c597e9803463791a0c8c7f912ff3c
+              expression: 'min(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.info.api.status[{#BACKUP.NAME}],86400)=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1'
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] Vm Info - Api Error'
+              priority: DISASTER
+              description: 'Verify that the MACRO {$PVE.HOST.URL} is set'
+            - uuid: 60ef6dac279e4de48c036c31678b1b07
+              expression: |
+                min(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.ha.status[{#BACKUP.NAME}],86400)=1 and
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.ha.managed[{#BACKUP.NAME}])=1
+              name: 'Proxmox: Backup [{#BACKUP.NAME}] Vm Info - Ha Status Error'
+              priority: DISASTER
+          master_item:
+            key: proxmox.backup.data
+          lld_macro_paths:
+            - lld_macro: '{#BACKUP.NAME}'
+              path: $.BkName
+      macros:
+        - macro: '{$PROXMOX.BACKUP.OVERDUE01}'
+          value: '1'
+          description: 'Delayed days (Low)'
+        - macro: '{$PROXMOX.BACKUP.OVERDUE02}'
+          value: '2'
+          description: 'Delayed days (Mid)'
+        - macro: '{$PROXMOX.BACKUP.OVERDUE03}'
+          value: '3'
+          description: 'Delayed days (High)'
+        - macro: '{$PROXMOX.BACKUP.OVERDUE04}'
+          value: '4'
+          description: 'Delayed days (Disaster)'
+        - macro: '{$PROXMOX.BACKUP.SCHEDULE.OVERRIDE}'
+          value: '0'
+          description: 'In case the checks are not in sync with the backup ending, set the days for the minimal checks. This will override all schedules that are more frequent than the set value'
+        - macro: '{$PROXMOX.BACKUP.STATE.CHECK}'
+          value: '1'
+          description: 'With 1 will verify state "ok" on the backup. If set 0 will check only if the backup is minimal size of {$PROXMOX.BACKUP.STATE.CHECK.SIZE}'
+        - macro: '{$PROXMOX.BACKUP.STATE.CHECK.SIZE}'
+          value: '1000'
+          description: 'Minimal backup size check in kbytes {$PROXMOX.BACKUP.STATE.CHECK}'
+        - macro: '{$PROXMOX.BACKUP.TAG.CHECK.ENABLED}'
+          value: role_prod
+          description: 'Tag used to enable the triggers for the hosts'
+        - macro: '{$PROXMOX.NODATA01}'
+          value: 1d
+          description: 'User for "Not updated" triggers (Low)'
+        - macro: '{$PROXMOX.NODATA02}'
+          value: 2d
+          description: 'User for "Not updated" triggers (Mid)'
+        - macro: '{$PROXMOX.NODATA03}'
+          value: 3d
+          description: 'User for "Not updated" triggers (High)'
+        - macro: '{$PROXMOX.NODATA04}'
+          value: 4d
+          description: 'User for "Not updated" triggers (Disaster)'
+        - macro: '{$PROXMOX.REQ.RETRY}'
+          value: '2'
+          description: 'Maximum retries for web requests'
+        - macro: '{$PROXMOX.REQ.RETRY.MS}'
+          value: '500'
+          description: 'Wait time in ms in retries'
+        - macro: '{$PVE.HOST.URL}'
+          value: 0.0.0.0
+          description: 'IP or FQDN of the host'
+        - macro: '{$PVE.HOSTNAME}'
+          description: 'Hostname in proxmox'
+        - macro: '{$PVE.TOKEN.ID}'
+          value: USER@REALM!TOKENID
+          description: 'API tokens allow stateless access to most parts of the REST API by another system, software or API client.'
+        - macro: '{$PVE.TOKEN.SECRET}'
+          value: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+          description: 'Secret key.'
+        - macro: '{$PVE.URL.PORT}'
+          value: '8006'
+          description: 'The API uses the HTTPS protocol and the server listens to port 8006 by default.'
