@@ -1,6 +1,6 @@
 zabbix_export:
   version: '6.0'
-  date: '2025-05-23T12:12:53Z'
+  date: '2025-05-26T07:37:21Z'
   groups:
     - uuid: de1143f089864e559c7816947bcdb5d5
       name: "Templates - \t0_CST_TPL"
@@ -74,6 +74,7 @@ zabbix_export:
                 APIError: "Ok",
                 ScheduleOverride: 0,
                 StateCheck: 1,
+                BackupEnabled: 1,
                 data: []
             };
             
@@ -81,6 +82,7 @@ zabbix_export:
             
             BackupData.ScheduleOverride = params.scheduleoverride;
             BackupData.StateCheck = params.statecheck;
+            BackupData.BackupEnabled = params.backupenabled;
             
             StateCheckSizeKb = params.statechecksize * 1000;
             
@@ -308,6 +310,8 @@ zabbix_export:
             By AdrenSnyder
           timeout: 1m
           parameters:
+            - name: backupenabled
+              value: '{$PROXMOX.BACKUP.ENABLED}'
             - name: hostname
               value: '{$PVE.HOSTNAME}'
             - name: port
@@ -331,6 +335,25 @@ zabbix_export:
           tags:
             - tag: component
               value: backup
+        - uuid: cbbc985a90264096a7a0941c4c180a22
+          name: 'Proxmox: Backup Enabled'
+          type: DEPENDENT
+          key: proxmox.backup.enabled
+          delay: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.BackupEnabled
+          master_item:
+            key: proxmox.backup.data
+          triggers:
+            - uuid: 82d14ef016c04310a2e316e790b8b12d
+              expression: 'last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=0'
+              name: 'Proxmox: Backup Monitoring disabled'
+              priority: INFO
+              tags:
+                - tag: scope
+                  value: availability
         - uuid: 7be231abe7c44bc0b0318e4d737e757e
           name: 'Proxmox: Backup Host Count'
           type: DEPENDENT
@@ -342,32 +365,6 @@ zabbix_export:
                 - $.BkHostCount
           master_item:
             key: proxmox.backup.data
-          triggers:
-            - uuid: 01a6bcfb1c2345709171010e5dc87f70
-              expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,1d)=0'
-              name: 'Proxmox: Backup no host found'
-              priority: WARNING
-              dependencies:
-                - name: 'Proxmox: Backup no host found'
-                  expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,2d)=0'
-            - uuid: 346773b4b5474225aed23b6e0ef168e9
-              expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,2d)=0'
-              name: 'Proxmox: Backup no host found'
-              priority: AVERAGE
-              dependencies:
-                - name: 'Proxmox: Backup no host found'
-                  expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,3d)=0'
-            - uuid: 3cacaa0d87f8469aa2dc76eb9f550713
-              expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,3d)=0'
-              name: 'Proxmox: Backup no host found'
-              priority: HIGH
-              dependencies:
-                - name: 'Proxmox: Backup no host found'
-                  expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,4d)=0'
-            - uuid: 8a258de5229b47a3a4be571ce1623d8a
-              expression: 'avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,4d)=0'
-              name: 'Proxmox: Backup no host found'
-              priority: DISASTER
         - uuid: 03d9e3f697d74492afbcc03fc5411dfc
           name: 'Proxmox: Backup Schedule Override'
           type: DEPENDENT
@@ -811,53 +808,70 @@ zabbix_export:
             - uuid: 30f7056a89a34f5bba78afaa83bb493f
               expression: |
                 last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE01} and 
-                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
               name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
               priority: WARNING
               dependencies:
                 - name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
                   expression: |
                     last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE02} and 
-                    find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+                    find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and 
+                    last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1 and 
+                    last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
             - uuid: 72cbd6f3664e460eb45d37c331c42d70
               expression: |
                 last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE02} and 
-                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
               name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
               priority: AVERAGE
               dependencies:
                 - name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
                   expression: |
                     last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE03} and 
-                    find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+                    find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and 
+                    last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1 and 
+                    last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
             - uuid: afb2728cf1c340ea9e584ddd7745420a
               expression: |
                 last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE03} and 
-                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
               name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
               priority: HIGH
               dependencies:
                 - name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
                   expression: |
                     last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE04} and 
-                    find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+                    find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and 
+                    last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1 and 
+                    last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
             - uuid: 3a9d6e3a37244f77a8a446a487405700
               expression: |
                 last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE04} and 
-                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
               name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE})'
               priority: DISASTER
             - uuid: 8345c16b1486489a8b80e38e24c8f702
               expression: |
                 last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.dayslate[{#BACKUP.NAME}])>{$PROXMOX.BACKUP.OVERDUE01} and 
-                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=0 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+                find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=0 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
               name: 'Proxmox: Backup [{#BACKUP.NAME}] Delayed Backup ({ITEM.LASTVALUE} - VM Not running)'
               priority: INFO
             - uuid: 1bc4d8a8680549bd86b65ad85a18d609
               expression: |
                 last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.count[{#BACKUP.NAME}])=0 and
                 find(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.qmpstatus[{#BACKUP.NAME}],,"regexp","running")=1 and
-                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
               name: 'Proxmox: Backup [{#BACKUP.NAME}] No backups found'
               priority: DISASTER
             - uuid: 54218206c0694738a3126aaac440ce64
@@ -897,7 +911,9 @@ zabbix_export:
               name: 'Proxmox: Backup [{#BACKUP.NAME}] Schedule frequency not recognized'
               priority: WARNING
             - uuid: 5b8c597e9803463791a0c8c7f912ff3c
-              expression: 'min(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.info.api.status[{#BACKUP.NAME}],86400)=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1'
+              expression: |
+                min(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.info.api.status[{#BACKUP.NAME}],86400)=1 and last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
               name: 'Proxmox: Backup [{#BACKUP.NAME}] Vm Info - Api Error'
               priority: DISASTER
               description: 'Verify that the MACRO {$PVE.HOST.URL} is set'
@@ -905,7 +921,8 @@ zabbix_export:
               expression: |
                 min(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.ha.status[{#BACKUP.NAME}],86400)=1 and
                 last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.tags.check.enabled[{#BACKUP.NAME}])=1 and 
-                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.ha.managed[{#BACKUP.NAME}])=1
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.vm.ha.managed[{#BACKUP.NAME}])=1 and 
+                last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
               name: 'Proxmox: Backup [{#BACKUP.NAME}] Vm Info - Ha Status Error'
               priority: DISASTER
           master_item:
@@ -914,6 +931,9 @@ zabbix_export:
             - lld_macro: '{#BACKUP.NAME}'
               path: $.BkName
       macros:
+        - macro: '{$PROXMOX.BACKUP.ENABLED}'
+          value: '1'
+          description: '1 for enabled. 0 for disabled'
         - macro: '{$PROXMOX.BACKUP.OVERDUE01}'
           value: '1'
           description: 'Delayed days (Low)'
@@ -970,3 +990,43 @@ zabbix_export:
         - macro: '{$PVE.URL.PORT}'
           value: '8006'
           description: 'The API uses the HTTPS protocol and the server listens to port 8006 by default.'
+  triggers:
+    - uuid: 01a6bcfb1c2345709171010e5dc87f70
+      expression: |
+        avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,1d)=0 and 
+        last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
+      name: 'Proxmox: Backup no host found'
+      priority: WARNING
+      dependencies:
+        - name: 'Proxmox: Backup no host found'
+          expression: |
+            avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,2d)=0 and 
+            last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
+    - uuid: 346773b4b5474225aed23b6e0ef168e9
+      expression: |
+        avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,2d)=0 and 
+        last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
+      name: 'Proxmox: Backup no host found'
+      priority: AVERAGE
+      dependencies:
+        - name: 'Proxmox: Backup no host found'
+          expression: |
+            avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,3d)=0 and 
+            last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
+    - uuid: 3cacaa0d87f8469aa2dc76eb9f550713
+      expression: |
+        avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,3d)=0 and 
+        last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
+      name: 'Proxmox: Backup no host found'
+      priority: HIGH
+      dependencies:
+        - name: 'Proxmox: Backup no host found'
+          expression: |
+            avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,4d)=0 and 
+            last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
+    - uuid: 8a258de5229b47a3a4be571ce1623d8a
+      expression: |
+        avg(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.host.count,4d)=0 and 
+        last(/0_CST_TPL-Proxmox VE by HTTP - Backup check/proxmox.backup.enabled)=1
+      name: 'Proxmox: Backup no host found'
+      priority: DISASTER
