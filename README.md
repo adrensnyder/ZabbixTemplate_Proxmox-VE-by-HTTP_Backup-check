@@ -18,6 +18,8 @@ Create an API token for user "zabbix@xxx" with token id "zabbix"
 Please copy the TokenID and Secret separately as they will not be displayed afterwards  
 
 Create a new role in Roles, or edit it if already exist, named "Zabbix" with:  
+Datastore.Allocate
+Datastore.AllocateSpace
 Datastore.Audit  
 Pool.Audit  
 SDN.Audit  
